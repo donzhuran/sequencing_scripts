@@ -1,0 +1,217 @@
+Whole Exome Sequencing (WES) data analysis
+
+##############################################################################
+SETTING UP ENVIRONMENT ----------
+
+# installing fastQC directly
+sudo apt install fastqc
+./fastqc
+
+# installing fastQC with downloaded zip file
+# https://www.bioinformatics.babraham.ac.uk/projects/fastqc/fastqc_v0.11.9.zip
+unzip fastqc_v0.11.9.zip
+cd FastQC
+./fastqc
+
+# installing BWA
+sudo apt install bwa
+
+# installing SAMTOOLS
+sudo apt install samtools
+
+# installing PICARD directly
+sudo apt-get install picard
+
+# installing PICARD via link
+# https://github.com/broadinstitute/picard/releases/tag/2.27.5
+gedit ~/.bashrc
+export Picard=/Users/apple/Download/picard.jar
+source ~/.bashrc
+java -jar $Picard
+
+# installing R and R Studio
+sudo apt install r-base
+# https://download1.rstudio.org/desktop/bionic/amd64/rstudio-2021.09.1-
+372-amd64.deb
+sudo apt install -f ./rstudio-2021.09.1-372-amd64.deb
+
+# installing GATK - for Variant calling
+# download from https://github.com/broadinstitute/gatk/releases
+unzip gatk-4.2.2.0.zip
+cd Downloads/gatk-4.2.2.0
+gedit ~/.bashrc
+GenomeAnalysisTK=/home/shivangi/gatk-4.2.5.0/gatk-package-4.2.5.0-
+local.jar
+source ~/.bashrc
+java -jar $GenomeAnalysisTK -h
+
+# installing BBMAP - for adapter trimming (alternative to Trimmomatic)
+# https://sourceforge.net/projects/bbmap/
+export PATH=/home/shivangi/bbmap/:$PATH
+
+# installing SRATOOLKIT
+# https://trace.ncbi.nlm.nih.gov/Traces/sra/sra.cgi?view=software
+tar xzvf sratoolkit.3.0.0-ubuntu64.tar.gz
+gedit ~/.bashrc
+export PATH=$PATH:/Users/shivangiagarwal/Downloads/sratoolkit.3.0.0-ubuntu64
+source ~/.bashrc
+fastq-dump --stdout SRR390728 | head -n 8
+vdb-config --interactive
+
+
+##############################################################################
+MANAGING DATA ----------
+
+# Fetching data and splitting the paired end files
+fastq-dump SRR4868198 # pair-end
+prefetch SRR4868198
+fastq-dump SRR4868198 –split-files # splitting per ends
+
+# Merge files from different lanes (if you donwloaded from SRA, then skip this)
+cat L001_R1_001.fastq.gz L002_R1_001.fastq.gz L003_R1_001.fastq.gz
+L004_R1_001.fastq.gz > R1.fastq.gz
+cat L001_R2_001.fastq.gz L002_R2_001.fastq.gz L003_R2_001.fastq.gz
+L004_R2_001.fastq.gz > R2.fastq.gz
+
+# unzip files
+gunzip R1.fastq.gz 
+gunzip R2.fastq.gz
+
+
+##############################################################################
+QUALITY CHECK ----------
+
+# The check was already performed, you just open the program
+../FastQC/fastqc 
+# in Java software (File-Open-choose file: R1.fastq and R2.fastq)
+
+	Per base sequence quality - everything should be in green window (from 28 to 36 bases long)
+	Per sequence quality score - most around 28-29 (most in the upper range)
+	Per base sequence content - For whole genome shotgun DNA sequencing the proportion of each of the four bases should
+		remain relatively constant over the length of the read with %A=%T and %G=%C.
+	Per sequence GC content - For whole genome shotgun sequencing the expectation is that the GC content of all reads should form a normal distribution with the peak
+		of the curve at the mean GC content for the organism sequenced
+	Per base N content - You should never see any point where this curve rises noticeably above zero.
+	Adapter Content - adaptors need to be removed --> Trimmomatic
+	
+
+##############################################################################
+ADAPTER TRIMMING ----------
+
+# input to bbduk and define output
+bbduk.sh in1=R1.fastq in2=R2.fastq out1=R1-trimmed.fastq out2=R2-trimmed.fastq
+
+# defining the sequence of adapters
+literal=AGATCGGAAGAGCACACGTCTGAACTCCAGTCA,AGATCGGAAGAGCGTCGTGTAGGGAAAGAG
+
+# define trimming options
+	# rl - right/left
+	# quality score trimq (quality scores above 20 for adapter bases)
+	# ktrim=r is for right-trimming (we have adapters on the right - 3')
+TGT qtrim=rl trimq=20 ktrim=r k=16 filterpolyg=5 tbo tpe
+
+# quality check again
+../FastQC/fastqc 
+# in Java software (File-Open-choose file: R1-trimmed.fastq and R2-trimmed.fastq)
+
+
+##############################################################################
+GENOME MAPPING ----------
+
+# downloading the reference Genome and creating dictionary
+java -jar $Picard CreateSequenceDictionary -R hg19.fasta -O hg19.dict
+java -jar /home/shivangi/wk/Run/picard.jar CreateSequenceDictionary -R hg19.fasta -O hg19.dict
+
+# creating index to be recognized by BWA
+samtools faidx hg19.fasta
+bwa index hg19.fasta index_prefix
+
+# Alignment of fastq files with reference genome (8-10 hours)
+bwa mem -t 32 hg19-agilent.fasta R1-trimmed.fastq R2-trimmed.fastq | samtools sort -o aln.bam
+# bwa mem outputs sam file which is big, so we sort it into bam file
+
+# Check stats (failed reads, percentage of alignment)
+samtools stats aln.bam > Stat_aln-log.txt
+samtools flagstat aln.bam > Flagstat_aln-log.txt
+
+# Validate your BAM
+java -jar /home/shivangiagarwal/Downloads/picard.jar ValidateSamFile
+I=aln_RG.bam MODE=SUMMARY
+
+# Indexing of BAM
+samtools view aln.bam
+samtools index aln_RG.bam aln_RG.bai
+
+# Add read groups (required only for GATK)
+samtools addreplacerg -r '@RG\tID:$i\\tLB:$i\\tPL:ILLUMINA\tSM:$i' -m
+overwrite_all -o aln_RG.bam aln.bam
+
+
+##############################################################################
+VARIANT CALLING ----------
+
+# Before GATK running,
+# 1. check stats of BAM
+# 2. BAM should be sorted
+# 3. Indexed BAM
+# 4. Read groups added
+# 5. hg19 file and its indices
+
+# Variant calling using GATK
+java -jar $GenomeAnalysisTK Mutect2 -R hg19.fasta -I aln_RG.bam -O sample.vcf
+# quality control for variant calling
+java -jar $GenomeAnalysis FilterMutectCalls -R hg19.fasta -V sample.vcf -O filtered.vcf
+
+# Filter variants via Ensembl VEP tool
+# http://grch37.ensembl.org/Homo_sapiens/Tools/VEP
+# 	SIFT < 0.05: Variants with scores closer to 0.0 are more confidently predicted to be deleterious.
+# 	POLYPHEN > 0.85: Values closer to 1.0 are more confidently predicted to be deleterious.
+# 	Allele Frequency, FATHMM, Depth of coverage, Quality
+
+
+##############################################################################
+COPY NUMBER CHANGES ----------
+
+# In R studio 
+install.packages(“devtools”)
+library(devtools)
+install_github("broadinstitute/ichorCNA")
+library(ichorCNA)
+install.packages("optparse")
+library (optparse)
+
+# In terminal
+mkdir HMMcopy
+cd HMMcopy
+wget https://github.com/shahcompbio/hmmcopy_utils/archive/master.zip
+unzip master.zip
+cmake .
+make
+cd bin
+./readCounter
+Download ichorCNA-master.zip https://github.com/broadinstitute/ichorCNA
+
+# input bam file to readCounter for tumor sample
+/Users/apple/Downloads/HMMcopy/hmmcopy_utils-master/bin/readCounter --window 1000000
+--quality 20 --chromosome
+"chr1,chr2,chr3,chr4,chr5,chr6,chr7,chr8,chr9,chr10,chr11,chr12,chr13,chr14,chr15,chr16,chr17,c
+hr18,chr19,chr20,chr21,chr22,chrX,chrY" ./ichor/aln_RG.bam > tumor.wig
+
+# input bam file to readCounter for normal sample
+/Users/apple/Downloads/HMMcopy/hmmcopy_utils-master/bin/readCounter --window 1000000
+--quality 20 --chromosome
+"chr1,chr2,chr3,chr4,chr5,chr6,chr7,chr8,chr9,chr10,chr11,chr12,chr13,chr14,chr15,chr16,chr17,c
+hr18,chr19,chr20,chr21,chr22,chrX,chrY" ./ichor/aln_RG.bam > normal.wig
+
+# start gcCounter and create gc.wig file
+/Users/apple/Downloads/HMMcopy/hmmcopy_utils-master/bin/gcCounter --window 1000000
+--chromosome
+"chr1,chr2,chr3,chr4,chr5,chr6,chr7,chr8,chr9,chr10,chr11,chr12,chr13,chr14,chr15,chr16,chr17,c
+hr18,chr19,chr20,chr21,chr22,chrX,chrY" hg19-agilent.fasta > gc.wig
+
+# download R script and analyze data
+Rscript /Users/apple/Downloads/runIchorCNA.R --id tumor --WIG tumor.wig
+--NORMWIG=normal.wig --ploidy "2" --maxCN 5 --gcWig gc.wig
+
+# Annotating regions of chromosomes from text file .cna.seg into gene symbols
+...
