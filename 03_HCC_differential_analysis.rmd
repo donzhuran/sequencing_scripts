@@ -1,0 +1,355 @@
+---
+title: "HCC dataset"
+output: html_notebook
+---
+
+# Library
+```{r}
+# Data manipulation
+library(data.table)
+library(magrittr)
+library(textshape)
+# Specialized formats of annotation
+library(rtracklayer)
+# Organism specific package.
+library(org.Hs.eg.db)
+# Visualization
+library(ggplot2)
+library(ggpubr)
+library(EnhancedVolcano)
+# Color palettes
+library(RColorBrewer)
+library(ggsci)
+# Differential expression
+library(DESeq2)
+library(clusterProfiler)
+library(gprofiler2)
+## String manipulation
+library(stringr)
+```
+
+```{r}
+hcc_expr <- fread("data/GSE184733_counts_ALL.txt.gz") %>% 
+  setnames(., "V1", "gene_name") # . = hcc_expr (ono što sam pipe-ao)
+##
+sample_table_dds <- read.csv("data/Sample_information.csv", row.names = "sample") %>% 
+  dplyr::filter(batch == "GSE184733")
+```
+
+
+```{r}
+#gene_info <- rtracklayer::import("../data/genome/Homo_sapiens.GRCh38.107.gtf")
+
+gene_info_prot <- as.data.table(gene_info)[type == "gene" & gene_biotype == "protein_coding"]
+# Merge and filter for only protein-coding genes
+hcc_expr <- merge(hcc_expr,gene_info_prot[,c("gene_name", "gene_id")] )
+
+# Make a separate table holding the different gene names
+gene_name_dt <- hcc_expr[, c("gene_name", "gene_id")]
+
+# Remove gene_id
+hcc_expr <- hcc_expr[,-c("gene_name")]
+```
+
+```{r}
+###
+my_counts <- hcc_expr %>% 
+  textshape::column_to_rownames("gene_id") %>% 
+  as.matrix()
+
+library(DESeq2)
+se_temp <- SummarizedExperiment(list(counts = my_counts))
+se_temp
+```
+
+```{r}
+###
+# Sort samples to be in the same order 
+se_temp <- se_temp[, colnames(se_temp)[match(rownames(sample_table_dds), colnames(se_temp))]] 
+
+# check if colnames of assay match rownames of sample table DataFrame 
+if(all(colnames(se_temp) == rownames(sample_table_dds))){ 
+  # set sample table as colData 
+  colData(se_temp) <- DataFrame(sample_table_dds) 
+}else{ 
+  # stop script with warrning 
+  stop("Columns in assay are not matching row of sample table. Please check your data annotation") 
+} 
+#### Make ddseq
+colData(se_temp)
+se_temp %>% assay
+### Important to include patient as a confounding variable since the tumor and normal samples are paired
+dds_temp <- DESeqDataSet(se_temp, design = ~ group + patient)
+dds_temp$group <- relevel(dds_temp$group, "Normal")
+```
+
+
+```{r}
+# Plot PPCA
+## Filter genes to contain at least 10 reads
+keep <- rowSums(counts(dds_temp)) >= 10 
+dds_temp <- dds_temp[keep,]
+
+dds_temp <- estimateSizeFactors(dds_temp)
+
+### PCA plot
+# data for PCA
+rlg <- vst(dds_temp) 
+
+###
+rlog_df <-
+  rlg %>%
+  assay(.)
+######
+# calculates pca
+pca <-
+  rlog_df %>%
+  t(.) %>%
+  stats::prcomp(.)
+
+##
+DESeq2::plotPCA(rlg, intgroup = "group")
+
+## Get PCA data
+pcaData <- plotPCA(rlg, intgroup=c("group"), returnData=TRUE) %>% as.data.table()
+
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+### plot
+library(ggplot2)  
+(pca_plot <- ggplot(pcaData, aes(PC1, PC2, color=group )) +
+      geom_point(size=3.2) +
+      xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+      ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+      ggsci::scale_color_jama() +
+      theme_light(base_size = 18) +
+      labs(color="")  +
+   geom_label(
+    label=pcaData$name, 
+    nudge_x = 0.25, nudge_y = 0.25, 
+    check_overlap = T
+  ))
+```
+
+
+# Heatmap samples
+```{r}
+### Heatmap
+dist_df <-
+  rlog_df %>%
+  t(.) %>%
+  dist(.)
+# make matrix
+dist_matrix <- as.matrix(dist_df)
+# ## Annotation column
+my_sample_col <- data.frame(group =rlg$group)
+row.names(my_sample_col) <- rownames(dist_matrix)
+
+ann_colors = list(
+  Diet = c(HCC = "indianred", normal = "darkgoldenrod")
+)
+# plot
+library(RColorBrewer)
+heatmap_samples <- pheatmap::pheatmap(dist_matrix,
+                                      clustering_distance_cols = "euclidean",
+                                      clustering_method = "complete",
+                                      col = colorRampPalette(rev(brewer.pal(8, "Reds")))(255),
+                                      annotation_col = my_sample_col,
+                                      annotation_colors = ann_colors, 
+                                      show_rownames = TRUE,
+                                      show_colnames = FALSE,
+                                      height = 10,
+                                      width = 12)
+```
+
+
+```{r}
+## Differentially expressed gene
+res_dds<- dds_temp %>% 
+  # Covert to DESeq
+  DESeq(.) %>% 
+  # run the test
+  results(., contrast = c("group", "carcinoma", "Normal"))
+
+##
+summary(res_dds)
+res_dds
+```
+
+
+# Get MA and Volcano plot
+```{r}
+getSignPlotDeseq <- function(dds_results) {
+  
+  title_name <- dds_results@elementMetadata[3,2] %>% str_remove(., "posterior SD: ")
+
+  # MA plot
+  ma_plot <- ggmaplot(dds_results,
+                      main = title_name,
+                      fdr = input_p_level, fc = 2^input_lfc.cutoff, size = 1,
+                      palette = c("#B31B21", "#1465AC", "darkgray"),
+                      genenames = as.vector(dds_results$name),
+                      legend = "top", top = 0,
+                      font.label = c("bold", 12),
+                      font.legend = "bold",
+                      font.main = "bold",
+                      ggtheme = ggplot2::theme_minimal())
+  # Volcano plot
+  volcano_plot <- EnhancedVolcano(dds_results,
+                                  title = title_name,
+                                  subtitle=NULL,
+                                  caption=NULL,
+                                  lab = rownames(dds_results),
+                                  pCutoff = input_p_level,
+                                   FCcutoff = input_lfc.cutoff,
+                                  x = 'log2FoldChange',
+                                  y = 'pvalue',
+                                  pointSize = 2, legendIconSize = 2.5    )
+  
+  return(list(ma_plot, volcano_plot))
+  
+}
+
+
+input_lfc.cutoff <- 1.33
+input_p_level <- 0.05
+
+## Function for getting a vector of differential expressed genes
+getSignDEG <- function(dt_input, p_level= input_p_level, lfc.cutoff = input_lfc.cutoff) {
+  
+  as.data.table(dt_input, keep.rownames="gene_name")[padj < p_level & abs(log2FoldChange) > lfc.cutoff] %>% 
+    .[, group := str_remove(dt_input@elementMetadata[3,2], "posterior SD: group ")] %>% 
+    return()
+  
+}
+
+######
+sig_res_dds <-  res_dds %>%  getSignDEG()
+
+MA_volcano <- getSignPlotDeseq(res_dds)
+MA_volcano[1]
+```
+
+
+# Heatmap DEGs
+```{r}
+###### Heatmap
+### Select genes that are differentialy expressed
+mat <- assay(rlg)[rownames(assay(rlg)) %in% sig_res_dds[, unique(gene_name)],]
+
+#### Plot
+if (nrow(mat) <= 45) {
+  show_DEG_genes <- TRUE
+  #Change matrix rownames to gene name
+  if (all.equal(rownames(mat), sig_res_dds$gene_name) == TRUE) {
+    rownames(mat) <- sig_res_dds$symbol 
+  }
+  
+} else {
+ show_DEG_genes <- FALSE 
+}
+# Plot heatmap of only DEGs
+plot_la <- pheatmap::pheatmap(mat, 
+                              scale="row",
+                              clustering_distance_cols = "euclidean",
+                              clustering_method = "complete",
+                              cluster_rows=TRUE, 
+                              show_rownames = show_DEG_genes,
+                              show_colnames = TRUE,
+                              cluster_cols=TRUE,
+                              color = colorRampPalette(c("darkblue", "white", "red"))(50),
+                              annotation_col=my_sample_col,
+                              annotation_colors = ann_colors)
+```
+
+
+# Gene Set Enrichment Analysis
+```{r}
+# we want the log2 fold change 
+original_gene_list <- res_dds$log2FoldChange
+
+# we want to change the gene names to ensembl gene ids
+ names(original_gene_list) <- res_dds %>% rownames()
+# names(original_gene_list) %>% length()
+# gene_name_dt[gene_name %in% names(original_gene_list)]$gene_id %>% length
+
+# omit any NA values 
+gene_list<-na.omit(original_gene_list)
+
+# sort the list in decreasing order (required for clusterProfiler)
+gene_list = sort(gene_list, decreasing = TRUE)
+##
+head(gene_list)
+```
+
+```{r}
+##
+gse <- gseGO(geneList=gene_list, 
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             #nPermSimple = 10000, 
+             minGSSize = 3, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "BH")
+#
+GO_dotplot <- dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign)
+GO_gseaplot <- enrichplot::gseaplot2(gse, title = gse$Description[207], geneSetID = 207, pvalue_table = TRUE)
+###
+as.data.table(gse)[, id := .I][grepl("DNA", Description)]
+```
+
+## Enrichment Filip code
+```{r}
+gostres <- gost(query = names(gene_list), 
+                organism = "hsapiens", ordered_query = TRUE, 
+                multi_query = FALSE, significant = TRUE, exclude_iea = FALSE, 
+                measure_underrepresentation = FALSE, evcodes = FALSE, 
+                user_threshold = 0.05, correction_method = "g_SCS", 
+                domain_scope = "annotated", custom_bg = NULL, 
+                numeric_ns = "", sources = NULL, as_short_link = FALSE)
+
+# get results
+goterms_results_tb <- gostres$result
+## Plot
+gostplot(gostres, capped = TRUE, interactive = TRUE)
+
+```
+
+
+# Over-Representation Analysis
+```{r}
+# Exctract significant results (padj < 0.05)
+sig_genes_df = subset(res_dds, padj < input_p_level)
+# From significant results, we want to filter on log2fold change
+genes <- sig_genes_df$log2FoldChange
+names(genes) <- rownames(sig_genes_df)
+# omit NA values
+genes <- na.omit(genes)
+# filter on min log2fold change (log2FoldChange > 2)
+genes <- names(genes)[abs(genes) > input_lfc.cutoff & genes < 0]
+## Create object
+go_enrich <- enrichGO(gene = genes,
+                      universe = names(gene_list),
+                      OrgDb =  'org.Hs.eg.db', 
+                      keyType = 'ENSEMBL',
+                      readable = T,
+                      ont = "ALL",
+                      pvalueCutoff = 0.05, 
+                      pAdjustMethod = "BH", 
+                      qvalueCutoff = 0.10)
+Go_barplot_over <- barplot(go_enrich, 
+                           drop = TRUE, 
+                           showCategory = 10, 
+                           font.size = 8, split="ONTOLOGY") + facet_grid(ONTOLOGY ~., scales = "free", space = "free")
+Go_dotplot_over <- dotplot(go_enrich, 
+                           showCategory = 10, 
+                           font.size = 8, split="ONTOLOGY") + facet_grid(ONTOLOGY ~., scales = "free", space = "free")
+```
+#  Gene-Concept Network
+```{r}
+edox <- setReadable(go_enrich, 'org.Hs.eg.db', 'ENTREZID')
+p1 <- cnetplot(edox, foldChange=gene_list)
+```
+

@@ -1,0 +1,121 @@
+###############################################################
+
+RNAseq data preparation script
+
+
+## Making a project
+
+mkdir liver_group
+cd liver_group
+mkdir data
+
+###############################################################
+
+## INSTALLING SRATOOLS FOR FETCHING .sra FILES
+
+# download sratools
+wget get https://github.com/ncbi/sra-tools/archive/refs/heads/master.zip
+OR
+wget --output-document sratoolkit.tar.gz https://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/current/sratoolkit.current-centos_linux64.tar.gz
+tar -xf sratoolkit.tar.gz
+cd sratoolkit.3.0.0-centos_linux64/bin
+
+# test if sratools is working by checking the version installed
+fasterq-dump -V
+OR
+./fasterq-dump --split-3 SRR649944  -O FASTQ_files/ &
+
+# if you have troubles with sratools, try setting the path
+export PATH=$PATH:$HOME/Documents/Packages/sratoolkit.3.0.0-ubuntu64/bin
+
+# allow remote access in sratools
+./vdb-config --interactive
+
+# make sure you installed fastqc
+sudo apt-get update
+sudo apt-get -y install fastqc
+
+# install trimmomatic
+conda install -c bioconda trimmomatic
+
+################################################################
+
+## FETCHING DATA YOU FOUND ONLINE
+
+# pre-download .sra files which you found online
+./prefetch SRR10606724 SRR10606710 (time-consuming)
+
+# splitting .sra files into 3' and 5' reads of .fastq format (_1 and _2)
+./fastq-dump --split-3 ~/Documents/RNAseq/SRR10606710.sra  -O ~/Documents/RNAseq
+./fastq-dump --split-3 ~/Documents/RNAseq/SRR10606724.sra  -O ~/Documents/RNAseq
+OR
+./fastq-dump --split-files SRR16126202 -X 900000 --outdir /mnt/c/Users/Yoga730/Desktop/liver_group/data &
+
+# zipping the .fastq files
+gzip splitted_sra_files/*.fastq (time-consuming)
+ls splitted_sra_files
+
+#################################################################
+
+## RUNNING FAST QUALITY CHECK
+
+# perform fastqc
+fastqc SRR10606710_1.fastq.gz
+fastqc SRR10606710_2.fastq.gz
+fastqc SRR10606724_1.fastq.gz
+fastqc SRR10606724_2.fastq.gz
+
+# read the output html files by locating them in windows folder by command "explorer.exe"
+
+###################################################################
+
+## CUTTING THE ADAPTERS
+
+# cut the adapters using trimmomatic
+trimmomatic PE SRR16126202_1.fastq SRR16126202_2.fastq \
+                SRR16126202_sub1.trim.fastq.gz SRR16126202_sub1un.trim.fastq.gz \
+                SRR16126202_sub2.trim.fastq.gz SRR16126202_sub2un.trim.fastq.gz \
+                ILLUMINACLIP:Sequencing_adaptors.fasta:2:30:10
+*note: fastqc was excelent so no cutting was performed!
+
+## checking the quality                
+fastqc SRR16126202_sub1.trim.fastq.gz
+fastqc SRR16126202_sub2.trim.fastq.gz 
+
+####################################################################
+
+## INDEXING AND MAPPING
+
+# Find genome assembly on this page https://www.ensembl.org/Homo_sapiens/Info/Index, 
+then go to DNA sequence and download .dna.fa (FASTA) file (http://ftp.ensembl.org/pub/release-107/fasta/homo_sapiens/dls -l
+na/)
+
+## Find gene annotation file on the same page and download it from here http://ftp.ensembl.org/pub/release-107/gtf/homo_sapiens/ as a .chr.gtf.gz file
+
+# Decompress files before executing indexing and mapping
+gzip -d Homo_sapiens.GRCh38.107.chr.gtf.gz
+gzip -d Homo_sapiens.GRCh38.dna.alt.fa.gz
+
+# Indexing (not enough memory)
+STAR --runThreadN 1 --runMode genomeGenerate --genomeLoad=NoSharedMemory --genomeFastaFiles ~/Documents/RNAseq/Homo_sapiens.GRCh38.dna.alt.fa --sjdbGTFfile ~/Documents/RNAseq/Homo_sapiens.GRCh38.107.chr.gtf --sjdbOverhang 99
+
+# Mapping (neuređeno i neisprobano)
+#STAR --readFilesIn SRR16126202_sub1.trim.fastq.gz  SRR16126202_sub2.trim.fastq.gz --outFileNamePrefix SRR16126202 --genomeDir STAR_INDEX --runThreadN 2 --readFilesCommand zcat
+
+# Samtools.
+#samtools view -F "" -t 2 -f bam -S -o  SRR16126202.bam  SRR16126202.out.sam        
+#samtools sort -m 6GB --tmpdir tmp -t 2 SRR16126202.sort.bam
+
+
+###############################################################
+## Run feature counts
+### Paired-end
+#featureCounts \
+#-p \ ##paired
+#-T 2 \
+#-a Homo_sapiens.GRCh38.107.gtf \
+#-F GTF \
+#-g gene_id \
+#--primary \ 
+#-o output_count \
+#SRR16126202.sort.bam

@@ -1,0 +1,175 @@
+---
+title: "Experimental design and exploratory analysis"
+author: "Paula Stancl"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Library
+```{r}
+# Data manipulation
+library(data.table)
+library(magrittr)
+library(textshape)
+# Specialized formats of annotation
+library(rtracklayer)
+# Organism specific package.
+library(org.Hs.eg.db)
+# Visualization
+library(ggplot2)
+library(ggpubr)
+library(EnhancedVolcano)
+# Color palettes
+library(RColorBrewer)
+library(ggsci)
+# Differential expression
+library(DESeq2)
+library(clusterProfiler)
+library(gprofiler2)
+```
+# Load the counts
+```{r}
+### Import counts
+nafld_expr <- fread("data/GSE185051_Gene_count.csv.gz")
+hcc_expr <- fread("data/GSE184733_counts_ALL.txt.gz") %>% 
+  # Rename V1 to Gene
+  dplyr::rename(Gene = V1)
+###### Import gene annotation and select only protein coding
+gene_info <- rtracklayer::import("data/Homo_sapiens.GRCh38.107.gtf.gz")
+gene_info_prot <- gene_info %>% 
+  # Convert to data.frame
+  as.data.frame() %>%
+  # Filter for only gene and protein coding ones
+  filter(type == "gene" & gene_biotype == "protein_coding")
+######
+expr_combined <- 
+  ### Join nafld_expr and hcc_expr
+  dplyr::inner_join(hcc_expr, nafld_expr) %>% # joining with inner type to join only genes that exist in both sets
+  # Rename Gene to gene_name
+  dplyr::rename(gene_name = Gene)
+  # Join the table with annotation data gene_info_prot containing only gene_name and gene_id
+  gene_info_prot_reduced <- dplyr::select(gene_info_prot, "gene_name", "gene_id")
+
+joined_data <- dplyr::inner_join(expr_combined, gene_info_prot_reduced) %>%
+  ## Remove gene_name
+  dplyr::select(-"gene_name") %>%
+  # Use textshape function column_to_rownames to place gene_id in rownames
+  column_to_rownames("gene_id") %>% # replaced gene names with ensembl IDs (important for GSEA later)
+  ## Convert to matrix
+  as.matrix()
+
+##### Import sample information
+sample_table_dds <- read.csv("data/Sample_information.csv", 
+                             row.names = "sample")
+```
+
+# Make SummarizedExperiment
+```{r}
+se_temp <- SummarizedExperiment(list(counts = joined_data))
+###
+# Sort samples to be in the same order 
+se_temp <- se_temp[, colnames(se_temp)[match(rownames(sample_table_dds), colnames(se_temp))]] 
+# check if colnames of assay match rownames of sample table DataFrame 
+if(all(colnames(se_temp) == rownames(sample_table_dds))){ 
+  # set sample table as colData 
+  colData(se_temp) <- DataFrame(sample_table_dds) 
+}else{ 
+  # stop script with warrning 
+  stop("Columns in assay are not matching row of sample table. Please check your data annotation") 
+} 
+#### Make ddseq
+colData(se_temp)
+dds_temp <- DESeqDataSet(se_temp, design = ~ group + patient) 
+#+patient je dodan kao cofounding factor koji utječe na analizu (jer tumor i zdravi potječu iz istog pacijenta)
+#+## ova skripta neće radit ako to ubacimo jer moraju svi uzorci biti upareni
+```
+# Plot PCA
+```{r}
+## Filter genes to contain at least 10 reads
+keep <- rowSums(counts(dds_temp)) >= 10  
+dds_temp <- dds_temp[keep,]
+
+dds_temp <- estimateSizeFactors(dds_temp)
+
+# data for PCA. VST and the rlog, is to remove the dependence of the variance on the mean, particularly the high variance of the logarithm of count data when the mean is low. Both VST and rlog use the experiment-wide trend of variance over mean, in order to transform the data to remove the experiment-wide trend. Note that we do not require or desire that all the genes have exactly the same variance after transformation.
+rlg <- vst(dds_temp)
+```
+
+# Removal of batch effect
+```{r}
+assay(rlg) <- limma::removeBatchEffect(assay(rlg), rlg$batch)
+```
+
+# PCA
+```{r}
+rlog_df <-
+  rlg %>%
+  assay(.)
+######
+# calculates pca
+pca <-
+  rlog_df %>%
+  t(.) %>%
+  stats::prcomp(.)
+
+##
+plotPCA(rlg, intgroup=c("group", "batch"))
+
+## Get PCA data
+pcaData <- plotPCA(rlg, intgroup=c("group", "batch", "nash_group"), returnData=TRUE) %>% 
+  as.data.frame()
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+### plot
+(pca_plot <- ggplot(pcaData, aes(PC1, PC2, color=`group.1`, shape = batch )) +
+      geom_point(size=4) +
+      xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+      ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+      ggsci::scale_color_jama() +
+      theme_light(base_size = 18) +
+      labs(color="")
+  )
+```
+
+# Heatmap samples
+```{r}
+### Make a matrix of sample distances
+dist_df <-
+  rlog_df %>%
+  # transpose the table
+  t(.) %>%
+  # Calculate euclidean distance between samples
+  dist(.)
+# make matrix
+dist_matrix <- as.matrix(dist_df)
+### Annotation column
+my_sample_col <- data.frame(group =rlg$group)
+row.names(my_sample_col) <- rownames(dist_matrix)
+## Make an annotation of sample group
+ann_colors = list(
+  group = c(carcinoma = "indianred", Normal = "darkgoldenrod1", `NAFLD disease` = "forestgreen")
+)
+# plot
+heatmap_samples <- pheatmap::pheatmap(dist_matrix,
+                                      clustering_distance_cols = "euclidean",
+                                      clustering_method = "complete",
+                                      col = colorRampPalette(rev(brewer.pal(9, "Reds")))(255),
+                                      annotation_col = my_sample_col,
+                                      annotation_colors = ann_colors, 
+                                      show_rownames = TRUE,
+                                      show_colnames = FALSE,
+                                      height = 10,
+                                      width = 12)
+```
+
+
+# Differential expression analysis
+```{r}
+###### Make an DESeq object
+dds_all <- DESeq(dds_temp) 
+
+####### Calculate significant differential expressed genes
+results(dds_all, contrast=c("group","NAFLD.disease","Normal"))
+results(dds_all, contrast=c("group","carcinoma","Normal"))
+results(dds_all, contrast=c("group","NAFLD.disease","carcinoma"))
+```

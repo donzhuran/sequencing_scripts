@@ -1,0 +1,134 @@
+---
+title: "Sample preparation and data cleaning"
+author: "Juran Kralj"
+output: html_notebook
+---
+
+
+########################################## LIBRARIES
+First you need to install libraries necessary for the project.
+
+```{r}
+# data wrangling libraries
+library(dplyr)
+library(readr)
+library(stringr)
+library(tibble)
+library(ggplot2)
+library(magrittr)
+
+# biology stuff libraries
+library(DESeq2)
+library(gprofiler2)
+
+# make stuff pretty libraries
+library(RColorBrewer)
+library(pheatmap)
+library(EnhancedVolcano)
+
+# make stuff clicky libraries
+library(plotly)
+library(htmlwidgets)
+```
+
+
+########################################## READ DATA
+
+```{r}
+HCC <-
+  read_delim("data/GSE184733_counts_ALL.txt.gz", delim = "\t", comment = "#")
+
+NAFLD_NASH <-
+  read_delim("data/GSE185051_Gene_count.csv.gz", delim = ",", comment = "#")
+```
+
+You can do it by using package  data.table which reads the table and fits everything by itself
+
+```{r}
+library(data.table)
+HCC <- fread("data/GSE184733_counts_ALL.txt.gz")
+
+# If you want to remove data table or a file from the environment, you can use 
+rm(HSS)
+```
+
+
+########################################## UNDERSTANDING THE DATA
+
+1. Characteristics of samples
+    - Seventeen fresh frozen HCC samples with paired non-neoplastic liver from Caucasian patients undergoing liver resection or transplant were used
+    - 4 female patients and 13 male patients, with ages ranging from 64 to 96 years
+    - Most of the patients (13/17) had a history of alcohol abuse
+    
+2. Generation of count matrix
+ -  - Sample type	SRA
+    - Extracted molecule	total RNA
+    - Raw image data were analyzed using the standard Illumina Pipeline, version 1.8.2.
+    - RNA-seq raw data (fastq data) were passed for overall quality check using FastQC
+    - The transcript quantification analysis of fastq data was performed using the Salmon program (salmon 0.99.0)
+    - reference transcriptome for humans (Homo_sapiens.GRCh38.cdna.all.fa)
+    - aligned to the index file for transcript quantification using “salmon quant” command, which resulted in a quant.sf file containing count information for each transcript
+    - The resultant files, quant.sf files, for all the samples were then grouped and analyzed together using R and Bioconductor’s tximport package, which generated a count matrix, with rows as transcript IDs and columns as specific samples
+    
+3. Method used for differential expression
+    - count matrix were then analyzed using DESeq2 package for pairwise differential expression analysis, which produced differentially expressed (DEx) genes (or transcripts) between HCC and non-neoplastic control tissue, based on a model of negative binomial distribution.
+    
+4. Most significant results
+    - Consistent with potential oxidative stress due to activated oxidative phosphorylation, DNA damage-related signals (e.g., the up-regulated hsa03420 nucleotide excision repair [FDR, 1.14E-04] and hsa03410 base excision repair [FDR, 2.71E-04] pathways) were observed. Among down-regulated genes (FDR, <0.10), functional terms related to cellular structures (e.g., cell membrane [FDR, 3.05E-21] and cell junction [FDR, 2.41E-07], were highly enriched, suggesting compromised formation of cellular structure in HCC at the transcriptome level.
+
+
+########################################## OPEN PATIENT DATA
+
+There is a package in Bioconductor which retrieves patient data from experiments.
+
+```{r}
+# BiocManager::install("GEOquery")
+library("GEOquery")
+# Select my id
+my_id <- "GSE184733"
+gse <- getGEO(my_id)
+my_id2 <- "GSE185051"
+gse2 <- getGEO(my_id2)
+
+##
+gse
+class(gse)
+gset <- gse[[1]] %>% pData()
+gse2t <- gse2[[1]] %>% pData()
+gset
+```
+
+########################################## MANAGING TABLES
+
+We need to extract some coloumns and rename them to match the other table.
+
+```{r}
+reduced_gset <- gset %>% 
+  #Selecting only important coloumns
+  dplyr::select("title", "patient id:ch1", "tumor status:ch1") %>% 
+  #Renaming coloumns
+  dplyr::rename(sample = title, patient = "patient id:ch1", group = "tumor status:ch1") %>%
+  #Adding a new coloumn
+  dplyr::mutate(batch = "GSE184733")
+reduced_gset
+```
+
+########################################## SAVING DATA
+
+```{r}
+# Writing simple csv file
+  readr::write_csv(x = reduced_gset, file = "reduced_GSE184733.csv")
+```
+
+########################################## MERGING TABLES
+
+```{r}
+library(data.table)
+# Import sample data which I want to append my table to
+sample <- fread("data/Sample_information.csv")
+# Add rows when coloumns are the same
+dplyr::bind_rows(sample, reduced_gset)
+sample
+
+```
+
